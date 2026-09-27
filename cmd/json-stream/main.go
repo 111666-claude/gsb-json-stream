@@ -2,7 +2,6 @@
 package main
 
 import (
-	"bufio"
 	"flag"
 	"fmt"
 	"io"
@@ -11,6 +10,52 @@ import (
 
 	"example.com/jsonstream"
 )
+
+// countingReader 统计流过的字节数（counters 用）。
+type countingReader struct {
+	source io.Reader
+	bytes  int
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.source.Read(p)
+	c.bytes += n
+	return n, err
+}
+
+// generator 边读边生成 N 个元素的 JSON 数组，峰值内存 O(单元素)。
+type generator struct {
+	total int
+	pos   int // -1 未开始；0..total-1 下一个元素；total 收尾
+	chunk []byte
+}
+
+func newGenerator(total int) *generator { return &generator{total: total, pos: -1} }
+
+func (g *generator) Read(p []byte) (int, error) {
+	for len(g.chunk) == 0 {
+		switch {
+		case g.pos < 0:
+			g.chunk = []byte("[")
+			g.pos = 0
+		case g.pos < g.total:
+			prefix := ","
+			if g.pos == 0 {
+				prefix = ""
+			}
+			g.chunk = []byte(fmt.Sprintf("%s{\"key\":\"k%05d\",\"value\":%d}", prefix, g.pos, g.pos))
+			g.pos++
+		case g.pos == g.total:
+			g.chunk = []byte("]")
+			g.pos++
+		default:
+			return 0, io.EOF
+		}
+	}
+	n := copy(p, g.chunk)
+	g.chunk = g.chunk[n:]
+	return n, nil
+}
 
 // Run 执行一次命令行调用，返回退出码。
 func Run(args []string, stdout, stderr io.Writer) int {
@@ -23,33 +68,26 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
-	var raw []byte
+	var source io.Reader
 	switch {
 	case *text != "":
-		raw = []byte(*text)
+		source = strings.NewReader(*text)
 	case *path != "":
-		content, err := os.ReadFile(*path)
+		file, err := os.Open(*path)
 		if err != nil {
 			fmt.Fprintln(stderr, err)
 			return 2
 		}
-		raw = content
+		defer file.Close()
+		source = file
 	case *generate > 0:
-		var builder strings.Builder
-		builder.WriteString("[")
-		for index := 0; index < *generate; index++ {
-			if index > 0 {
-				builder.WriteString(",")
-			}
-			builder.WriteString(fmt.Sprintf("{\"key\":\"k%05d\",\"value\":%d}", index, index))
-		}
-		builder.WriteString("]")
-		raw = []byte(builder.String())
+		source = newGenerator(*generate)
 	default:
 		fmt.Fprintln(stderr, "用法：json-stream --file x.json | --text '[...]' | --generate 100000")
 		return 2
 	}
-	reader, err := jsonstream.New(raw)
+	counter := &countingReader{source: source}
+	reader, err := jsonstream.New(counter)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
@@ -64,11 +102,14 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		count++
 		last = element
 	}
+	if err := reader.Err(); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
 	fmt.Fprintf(stdout, "elements=%d last=%s:%d\n", count, last.Key, last.Value)
 	if *counters {
-		fmt.Fprintf(stdout, "peak=%d bytes=%d\n", reader.Peak(), len(raw))
+		fmt.Fprintf(stdout, "peak=%d bytes=%d\n", reader.Peak(), counter.bytes)
 	}
-	_ = bufio.NewScanner
 	return 0
 }
 

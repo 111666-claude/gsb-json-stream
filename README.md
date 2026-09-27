@@ -21,9 +21,14 @@ go run ./cmd/json-stream --generate 100000 --counters
 
 ## 现在的行为
 
-- `New` 先 `json.Unmarshal` 成 `[]map[string]any`：整份进内存（`peak` 等于输入长度）。
-- `value` 从 `float64` 转 `int64`：`9007199254740993` 变成 `9007199254740992`。
-- 没有流式接口，调用方也拿不到增量结果；`bufio` 都没用上。
+- `New(io.Reader)` 用 `json.Decoder` 逐元素解码（`Token`/`More`），峰值内存 O(单元素)；
+  `peak` 是迄今最大单个元素的字节数。
+- `value` 按 `json.Number` 走整数解析，`9007199254740993` 原样保留；超出 int64 报错。
+- 缺 `key`/`value`、类型不对、顶层不是数组都报错，并指出元素下标。
+- 增量接口：`Next()` 之外还有 `NextN(n)`（一次读 N 个）与 `ForEach(fn)`（回调式），
+  调用方不需要把结果全存下来；`Err()` 报告迭代中的解析错误。
+- `reference.go` 的 `UnmarshalAll` 是整份 `Unmarshal` 的朴素参考实现，
+  对照测试用它逐元素比对键、值与下标，并比较峰值内存量级。
 
 ## 计划新增的能力
 
@@ -43,6 +48,8 @@ peak=… bytes=…
 
 ```
 stream.go         流式读取
+reference.go      整份 Unmarshal 的朴素参考实现（对照测试用）
 cmd/json-stream   命令行入口
 stream_test.go    go test 用例
+compare_test.go   流式 vs 参考实现的对照测试
 ```

@@ -12,6 +12,37 @@ import (
 	"example.com/jsonstream"
 )
 
+// countingReader 统计流过的字节数。
+type countingReader struct {
+	source io.Reader
+	total  int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.source.Read(p)
+	c.total += int64(n)
+	return n, err
+}
+
+// generateArray 流式生成 N 个元素的 JSON 数组，不整份进内存。
+func generateArray(count int) io.Reader {
+	reader, writer := io.Pipe()
+	go func() {
+		buffered := bufio.NewWriterSize(writer, 64*1024)
+		buffered.WriteString("[")
+		for index := 0; index < count; index++ {
+			if index > 0 {
+				buffered.WriteString(",")
+			}
+			fmt.Fprintf(buffered, "{\"key\":\"k%05d\",\"value\":%d}", index, index)
+		}
+		buffered.WriteString("]")
+		buffered.Flush()
+		writer.Close()
+	}()
+	return reader
+}
+
 // Run 执行一次命令行调用，返回退出码。
 func Run(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("json-stream", flag.ContinueOnError)
@@ -23,52 +54,45 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
-	var raw []byte
+	var source io.Reader
 	switch {
 	case *text != "":
-		raw = []byte(*text)
+		source = strings.NewReader(*text)
 	case *path != "":
-		content, err := os.ReadFile(*path)
+		file, err := os.Open(*path)
 		if err != nil {
 			fmt.Fprintln(stderr, err)
 			return 2
 		}
-		raw = content
+		defer file.Close()
+		source = file
 	case *generate > 0:
-		var builder strings.Builder
-		builder.WriteString("[")
-		for index := 0; index < *generate; index++ {
-			if index > 0 {
-				builder.WriteString(",")
-			}
-			builder.WriteString(fmt.Sprintf("{\"key\":\"k%05d\",\"value\":%d}", index, index))
-		}
-		builder.WriteString("]")
-		raw = []byte(builder.String())
+		source = generateArray(*generate)
 	default:
 		fmt.Fprintln(stderr, "用法：json-stream --file x.json | --text '[...]' | --generate 100000")
 		return 2
 	}
-	reader, err := jsonstream.New(raw)
+	counter := &countingReader{source: source}
+	reader, err := jsonstream.NewReader(counter)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
 	count := 0
 	last := jsonstream.Element{}
-	for {
-		element, ok := reader.Next()
-		if !ok {
-			break
-		}
+	err = reader.Each(func(element jsonstream.Element) error {
 		count++
 		last = element
+		return nil
+	})
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
 	}
 	fmt.Fprintf(stdout, "elements=%d last=%s:%d\n", count, last.Key, last.Value)
 	if *counters {
-		fmt.Fprintf(stdout, "peak=%d bytes=%d\n", reader.Peak(), len(raw))
+		fmt.Fprintf(stdout, "peak=%d bytes=%d\n", reader.Peak(), counter.total)
 	}
-	_ = bufio.NewScanner
 	return 0
 }
 

@@ -19,11 +19,17 @@ go run ./cmd/json-stream --generate 100000 --counters
   空数组返回 0 个元素。
 - 规模：1 GB 的 JSON 数组要能边读边处理，峰值内存 O(单元素)；不许整份读进内存再 `Unmarshal`。
 
-## 现在的行为
+## 实现方式
 
-- `New` 先 `json.Unmarshal` 成 `[]map[string]any`：整份进内存（`peak` 等于输入长度）。
-- `value` 从 `float64` 转 `int64`：`9007199254740993` 变成 `9007199254740992`。
-- 没有流式接口，调用方也拿不到增量结果；`bufio` 都没用上。
+- `NewReader(io.Reader)` 用 `json.Decoder` 逐元素解码（`Token`/`More` + 单元素 `Decode`），
+  峰值内存 O(单元素)；`New([]byte)` 是其内存版便捷封装。
+- `value` 按 `json.RawMessage` 取出后用 `strconv.ParseInt` 解析：整数原样保留，
+  字符串、小数、超出 int64 都报带元素下标的错误。
+- 增量接口：`Next()` 逐项（读完返回 `io.EOF`）、`ReadN(n)` 一次取 n 项、
+  `Each(fn)` 回调式遍历，调用方不需要把结果全存下来。
+- `peak` 统计迄今最大单元素的字节数；`bytes` 是流过的输入字节数。
+- `reference_test.go` 里有「整份 Unmarshal」的朴素参考实现，测试对 1000 份随机数组
+  逐元素比对键、值与下标，并检查峰值内存远小于整份输入。
 
 ## 计划新增的能力
 
@@ -42,7 +48,8 @@ peak=… bytes=…
 ## 目录
 
 ```
-stream.go         流式读取
-cmd/json-stream   命令行入口
+stream.go         流式读取（Next / ReadN / Each）
+cmd/json-stream   命令行入口（--file/--generate 也是流式）
 stream_test.go    go test 用例
+reference_test.go 整份 Unmarshal 参考实现与对照测试
 ```
